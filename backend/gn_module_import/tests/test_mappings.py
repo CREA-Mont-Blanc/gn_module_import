@@ -1,9 +1,7 @@
-from pathlib import Path
 from copy import deepcopy
 
 import pytest
-from flask import testing, url_for
-from werkzeug.datastructures import Headers
+from flask import url_for
 from werkzeug.exceptions import Unauthorized, Forbidden, BadRequest, Conflict, NotFound
 from jsonschema import validate as validate_json
 from sqlalchemy import func
@@ -11,43 +9,21 @@ from sqlalchemy.orm import joinedload
 
 from geonature.utils.env import db
 from geonature.tests.utils import set_logged_user_cookie
-from geonature.core.gn_permissions.models import (
-    Permission,
-)
-from geonature.core.gn_commons.models import TModules
-from geonature.core.gn_meta.models import (
-    TNomenclatures,
-    TAcquisitionFramework,
-    TDatasets,
-)
 
 from pypnnomenclature.models import BibNomenclaturesTypes
-from pypnusershub.db.models import (
-    User,
-    Organisme,
-    Application,
-    Profils as Profil,
-    UserApplicationRight,
-)
 
 from gn_module_import.models import (
     MappingTemplate,
     FieldMapping,
     ContentMapping,
-    BibThemes,
     BibFields,
-    ImportUserError,
-    ImportUserErrorType,
 )
 
 from .jsonschema_definitions import jsonschema_definitions
 
 
-tests_path = Path(__file__).parent
-
-
 @pytest.fixture()
-def mappings(users):
+def mappings(synthese_destination, users):
     mappings = {}
     fieldmapping_values = {
         field.name_field: True
@@ -74,34 +50,47 @@ def mappings(users):
     }
     with db.session.begin_nested():
         mappings["content_public"] = ContentMapping(
+            destination=synthese_destination,
             label="Content Mapping",
             active=True,
             public=True,
             values=contentmapping_values,
         )
         mappings["field_public"] = FieldMapping(
+            destination=synthese_destination,
             label="Public Field Mapping",
             active=True,
             public=True,
             values=fieldmapping_values,
         )
-        mappings["field"] = FieldMapping(label="Private Field Mapping", active=True, public=False)
+        mappings["field"] = FieldMapping(
+            destination=synthese_destination,
+            label="Private Field Mapping",
+            active=True,
+            public=False,
+        )
         mappings["field_public_disabled"] = FieldMapping(
-            label="Disabled Public Field Mapping", active=False, public=True
+            destination=synthese_destination,
+            label="Disabled Public Field Mapping",
+            active=False,
+            public=True,
         )
         mappings["self"] = FieldMapping(
+            destination=synthese_destination,
             label="Self’s Mapping",
             active=True,
             public=False,
             owners=[users["self_user"]],
         )
         mappings["stranger"] = FieldMapping(
+            destination=synthese_destination,
             label="Stranger’s Mapping",
             active=True,
             public=False,
             owners=[users["stranger_user"]],
         )
         mappings["associate"] = FieldMapping(
+            destination=synthese_destination,
             label="Associate’s Mapping",
             active=True,
             public=False,
@@ -111,7 +100,7 @@ def mappings(users):
     return mappings
 
 
-@pytest.mark.usefixtures("client_class", "temporary_transaction")
+@pytest.mark.usefixtures("client_class", "temporary_transaction", "default_synthese_destination")
 class TestMappings:
     def test_list_mappings(self, users, mappings):
         set_logged_user_cookie(self.client, users["noright_user"])
@@ -134,13 +123,14 @@ class TestMappings:
         )
 
     def test_get_mapping(self, users, mappings):
-        get_mapping = lambda mapping: self.client.get(
-            url_for(
-                "import.get_mapping",
-                mappingtype=mapping.type.lower(),
-                id_mapping=mapping.id,
+        def get_mapping(mapping):
+            return self.client.get(
+                url_for(
+                    "import.get_mapping",
+                    mappingtype=mapping.type.lower(),
+                    id_mapping=mapping.id,
+                )
             )
-        )
 
         assert get_mapping(mappings["field_public"]).status_code == Unauthorized.code
 
@@ -170,7 +160,11 @@ class TestMappings:
 
         unexisting_id = db.session.query(func.max(MappingTemplate.id)).scalar() + 1
         r = self.client.get(
-            url_for("import.get_mapping", mappingtype="field", id_mapping=unexisting_id)
+            url_for(
+                "import.get_mapping",
+                mappingtype="field",
+                id_mapping=unexisting_id,
+            )
         )
         assert r.status_code == NotFound.code
 
@@ -256,7 +250,11 @@ class TestMappings:
         assert self.client.post(url, data=fieldmapping).status_code == BadRequest.code
 
         # label already exist
-        url = url_for("import.add_mapping", mappingtype="field", label=mappings["field"].label)
+        url = url_for(
+            "import.add_mapping",
+            mappingtype="field",
+            label=mappings["field"].label,
+        )
         assert self.client.post(url, data=fieldmapping).status_code == Conflict.code
 
         # label may be reused between field and content
@@ -286,7 +284,11 @@ class TestMappings:
         assert mapping.owners == [users["user"]]
 
     def test_add_content_mapping(self, users, mappings):
-        url = url_for("import.add_mapping", mappingtype="content", label="test content mapping")
+        url = url_for(
+            "import.add_mapping",
+            mappingtype="content",
+            label="test content mapping",
+        )
         set_logged_user_cookie(self.client, users["user"])
 
         contentmapping = {
@@ -313,11 +315,6 @@ class TestMappings:
 
     def test_update_mapping_label(self, users, mappings):
         mapping = mappings["associate"]
-        url = url_for(
-            "import.update_mapping",
-            mappingtype=mapping.type.lower(),
-            id_mapping=mapping.id,
-        )
 
         r = self.client.post(
             url_for(
@@ -381,7 +378,11 @@ class TestMappings:
         fieldvalues_should = deepcopy(fieldvalues_update)
         del fieldvalues_update["validator"]  # should not removed from mapping!
         r = self.client.post(
-            url_for("import.update_mapping", mappingtype=fm.type.lower(), id_mapping=fm.id),
+            url_for(
+                "import.update_mapping",
+                mappingtype=fm.type.lower(),
+                id_mapping=fm.id,
+            ),
             data=fieldvalues_update,
         )
         assert r.status_code == 200
@@ -389,7 +390,11 @@ class TestMappings:
         fieldvalues_update = deepcopy(fm.values)
         fieldvalues_update["unexisting"] = "unexisting"
         r = self.client.post(
-            url_for("import.update_mapping", mappingtype=fm.type.lower(), id_mapping=fm.id),
+            url_for(
+                "import.update_mapping",
+                mappingtype=fm.type.lower(),
+                id_mapping=fm.id,
+            ),
             data=fieldvalues_update,
         )
         assert r.status_code == BadRequest.code
@@ -405,7 +410,11 @@ class TestMappings:
         contentvalues_should = deepcopy(contentvalues_update)
         del contentvalues_update["NAT_OBJ_GEO"]["St"]  # should not be removed!
         r = self.client.post(
-            url_for("import.update_mapping", mappingtype=cm.type.lower(), id_mapping=cm.id),
+            url_for(
+                "import.update_mapping",
+                mappingtype=cm.type.lower(),
+                id_mapping=cm.id,
+            ),
             data=contentvalues_update,
         )
         assert r.status_code == 200
@@ -413,7 +422,11 @@ class TestMappings:
         contentvalues_update = deepcopy(cm.values)
         contentvalues_update["NAT_OBJ_GEO"] = "invalid"
         r = self.client.post(
-            url_for("import.update_mapping", mappingtype=cm.type.lower(), id_mapping=cm.id),
+            url_for(
+                "import.update_mapping",
+                mappingtype=cm.type.lower(),
+                id_mapping=cm.id,
+            ),
             data=contentvalues_update,
         )
         assert r.status_code == BadRequest.code
@@ -444,7 +457,11 @@ class TestMappings:
 
         set_logged_user_cookie(self.client, users["user"])
         r = self.client.delete(
-            url_for("import.delete_mapping", mappingtype="content", id_mapping=mapping.id)
+            url_for(
+                "import.delete_mapping",
+                mappingtype="content",
+                id_mapping=mapping.id,
+            )
         )
         assert r.status_code == NotFound.code
         assert MappingTemplate.query.get(mapping.id) is not None
@@ -458,38 +475,3 @@ class TestMappings:
         )
         assert r.status_code == 204
         assert MappingTemplate.query.get(mapping.id) is None
-
-    def test_synthesis_fields(self, users):
-        assert (
-            self.client.get(url_for("import.get_synthesis_fields")).status_code
-            == Unauthorized.code
-        )
-        set_logged_user_cookie(self.client, users["admin_user"])
-        r = self.client.get(url_for("import.get_synthesis_fields"))
-        assert r.status_code == 200
-        data = r.get_json()
-        themes_count = BibThemes.query.count()
-        schema = {
-            "definitions": jsonschema_definitions,
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "theme": {"$ref": "#/definitions/synthesis_theme"},
-                    "fields": {
-                        "type": "array",
-                        "items": {"$ref": "#/definitions/synthesis_field"},
-                        "uniqueItems": True,
-                        "minItems": 1,
-                    },
-                },
-                "required": [
-                    "theme",
-                    "fields",
-                ],
-                "additionalProperties": False,
-            },
-            "minItems": themes_count,
-            "maxItems": themes_count,
-        }
-        validate_json(data, schema)
